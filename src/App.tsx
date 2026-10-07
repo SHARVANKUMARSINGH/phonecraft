@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Smartphone, RotateCw, Layers, Zap, SlidersHorizontal, X, FlipHorizontal2 } from 'lucide-react'
+import { Smartphone, RotateCw, Zap, SlidersHorizontal, X, FlipHorizontal2 } from 'lucide-react'
 import SandboxCanvas from './Phone3D'
 import { useStore } from './store'
 import * as D from './data'
+import { ModeSwitch, RenderControls, SidePanels } from './Panels'
 
 const box = 'rounded-md border border-[#2a313b] bg-[#161b22]'
 function Group({ title, children }: any) {
@@ -88,7 +89,7 @@ export default function App() {
 
       <aside className={`absolute bottom-0 left-0 top-14 z-10 w-[min(340px,92vw)] overflow-y-auto border-r border-[#232a33] bg-[#0d1117]/85 backdrop-blur-md transition-transform ${open ? '' : '-translate-x-full'}`}><Panel /></aside>
 
-      <aside className="pointer-events-none absolute right-3 top-3 z-10 hidden w-60 rounded-lg border border-[#232a33] bg-[#0d1117]/80 p-4 backdrop-blur-md md:block">
+      <aside className={`pointer-events-none absolute right-3 top-3 z-10 w-60 rounded-lg border border-[#232a33] bg-[#0d1117]/80 p-4 backdrop-blur-md ${s.editMode || s.isTeardownMode ? "hidden" : "hidden md:block"}`}>
         <dl className="divide-y divide-[#232a33]">
           <Stat k="Price" v={`$${s.totalPrice.toLocaleString()}`} />
           <Stat k="Weight" v={`${s.estimatedWeightGrams} g`} />
@@ -109,12 +110,14 @@ export default function App() {
             <span className="w-9 text-right text-xs tabular-nums">{Math.round(s.explodedSlider * 100)}%</span>
           </div>)}
         <div className="pointer-events-auto flex flex-wrap justify-center gap-2 rounded-lg border border-[#232a33] bg-[#0d1117]/85 p-2 backdrop-blur-md">
-          <Btn on={s.isTeardownMode} onClick={() => s.set({ isTeardownMode: !s.isTeardownMode })}><Layers size={15} />Teardown</Btn>
+          <ModeSwitch />
           <Btn on={s.showBack} onClick={() => s.set({ showBack: !s.showBack })}><FlipHorizontal2 size={15} />{s.showBack ? 'Back' : 'Front'}</Btn>
           <Btn on={s.flashOn} onClick={() => s.set({ flashOn: !s.flashOn })}><Zap size={15} />Flash</Btn>
           <Btn on={s.autoRotate} onClick={() => s.set({ autoRotate: !s.autoRotate })}><RotateCw size={15} />Orbit</Btn>
+          <RenderControls />
         </div>
       </footer>
+      <SidePanels />
     </div>
   )
 }

@@ -1,9 +1,11 @@
 import * as THREE from 'three'
-import { useMemo, useRef } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
-import { Environment, Lightformer, OrbitControls, ContactShadows, Html } from '@react-three/drei'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { shallow } from 'zustand/shallow'
+import { Environment, Lightformer, OrbitControls, ContactShadows, Html, TransformControls, PerformanceMonitor, GizmoHelper, GizmoViewport } from '@react-three/drei'
 import { Geometry, Base, Subtraction } from '@react-three/csg'
-import { useStore } from './store'
+import { useStore, usePick } from './store'
+import { T as TX, studioHDR } from './textures'
 import { GLASS, CHASSIS, BACK, COOLING, CameraSensor, CameraLayout } from './data'
 
 const S = 0.01 // 1 scene unit = 100 mm; everything below is authored in millimetres
@@ -17,28 +19,6 @@ function rr(w: number, h: number, r: number, ox = 0, oy = 0) {
   s.lineTo(x + r, y + h); s.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false)
   s.lineTo(x, y + r); s.absarc(x + r, y + r, r, Math.PI, 1.5 * Math.PI, false)
   return s
-}
-
-let carbon: THREE.CanvasTexture | null = null, noise: THREE.CanvasTexture | null = null
-function carbonTex() {
-  if (carbon) return carbon
-  const c = document.createElement('canvas'); c.width = c.height = 128
-  const g = c.getContext('2d')!
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-    const a = (x + y) % 2, gr = g.createLinearGradient(x * 16, y * 16, x * 16 + 16, y * 16 + 16)
-    gr.addColorStop(0, a ? '#34343a' : '#0a0a0c'); gr.addColorStop(1, a ? '#0a0a0c' : '#34343a')
-    g.fillStyle = gr; g.fillRect(x * 16, y * 16, 16, 16)
-  }
-  carbon = new THREE.CanvasTexture(c); carbon.wrapS = carbon.wrapT = THREE.RepeatWrapping; carbon.repeat.set(1 / 8, 1 / 8); carbon.colorSpace = THREE.SRGBColorSpace
-  return carbon
-}
-function noiseTex() {
-  if (noise) return noise
-  const c = document.createElement('canvas'); c.width = c.height = 128
-  const g = c.getContext('2d')!
-  for (let i = 0; i < 128 * 128; i++) { const v = (Math.random() * 255) | 0; g.fillStyle = `rgb(${v},${v},${v})`; g.fillRect(i % 128, (i / 128) | 0, 1, 1) }
-  noise = new THREE.CanvasTexture(c); noise.wrapS = noise.wrapT = THREE.RepeatWrapping; noise.repeat.set(1 / 3, 1 / 3)
-  return noise
 }
 
 function useScreenTex(w: number, h: number, color: string, hz: number, label: string) {
@@ -116,7 +96,7 @@ function Lens({ cam, x, y }: { cam: CameraSensor; x: number; y: number }) {
 }
 
 function Island() {
-  const { baseWidth: w, baseHeight: h, cameraLayout, rearCameras, flashOn, cameraBumpMM: bump } = useStore()
+  const { baseWidth: w, baseHeight: h, cameraLayout, rearCameras, flashOn, cameraBumpMM: bump } = usePick(['baseWidth', 'baseHeight', 'cameraLayout', 'rearCameras', 'flashOn', 'cameraBumpMM'])
   const L = useMemo(() => layoutOf(cameraLayout, rearCameras.length, w, h), [cameraLayout, rearCameras.length, w, h])
   const shape = useMemo(() => rr(L.iw, L.ih, L.rad), [L])
   const zTop = -0.5 - bump // back-panel outer face is at local z = -0.5; the island extrudes exactly `bump` mm outward
@@ -145,15 +125,30 @@ function Island() {
 
 function Layer({ idx, z, name, children }: any) {
   const ref = useRef<THREE.Group>(null!)
-  const tear = useStore((s) => s.isTeardownMode), w = useStore((s) => s.baseWidth)
+  const tear = useStore((s) => s.isTeardownMode), w = useStore((s) => s.baseWidth), focus = useStore((s) => s.focusLayer), busy = useStore((s) => !!s.renderJob)
+  useEffect(() => {
+    const dim = focus !== null && focus !== idx
+    ref.current.traverse((o: any) => {
+      if (!o.material) return
+      for (const m of ([] as any[]).concat(o.material)) {
+        if (m.userData.t === undefined) { m.userData.t = m.transparent; m.userData.o = m.opacity }
+        const t = dim || m.userData.t; if (m.transparent !== t) m.needsUpdate = true
+        m.transparent = t; m.opacity = dim ? 0.08 : m.userData.o; m.depthWrite = !dim
+      }
+    })
+  }, [focus, idx])
   useFrame((_, dt) => {
-    const s = useStore.getState(), e = s.isTeardownMode ? s.explodedSlider : 0
-    ref.current.position.z = THREE.MathUtils.damp(ref.current.position.z, z + e * (idx - 2.5) * 30, 6, dt)
+    const s = useStore.getState(), e = s.isTeardownMode ? s.explodedSlider : 0, k = idx - 2.5, r = 5 + idx * 0.35, g = ref.current.position
+    g.z = THREE.MathUtils.damp(g.z, z + e * k * 34, r, dt)
+    g.x = THREE.MathUtils.damp(g.x, e * k * 5, r, dt)
+    g.y = THREE.MathUtils.damp(g.y, -e * k * 3, r, dt)
   })
   return (
-    <group ref={ref}>
+    <group ref={ref} onPointerOver={(e) => { if (tear) { e.stopPropagation(); useStore.setState({ focusLayer: idx }) } }} onPointerOut={() => tear && useStore.setState({ focusLayer: null })}>
       {children}
-      {tear && <Html position={[w / 2 + 10, 0, 0]} style={{ pointerEvents: 'none' }}><div className="whitespace-nowrap rounded bg-black/70 px-2 py-0.5 text-[11px] text-amber-200 border border-white/10">{name}</div></Html>}
+      {tear && !busy && <Html position={[w / 2 + 6, 0, 0]} style={{ pointerEvents: 'none' }}>
+        <div className="flex items-center"><span className="h-px w-8 bg-amber-300/70" /><div className="whitespace-nowrap rounded border border-white/10 bg-black/75 px-2 py-0.5 text-[11px] text-amber-200">{name}</div></div>
+      </Html>}
     </group>
   )
 }
@@ -166,7 +161,7 @@ function Fan({ t }: { t: number }) {
 }
 
 function Phone() {
-  const s = useStore()
+  const s = usePick(['baseWidth', 'baseHeight', 'cornerRounding', 'frontGlass', 'chassis', 'backPanel', 'colorHex', 'soc', 'ram', 'battery', 'cooling', 'haptics', 'displayType', 'displayCurve', 'refreshRate', 'frontCamera', 'thicknessMM'])
   const w = s.baseWidth, h = s.baseHeight, r = s.cornerRounding * 9, T = s.thicknessMM
   const bt = s.battery.thickness, ct = COOLING[s.cooling].t
   const glass = GLASS[s.frontGlass], ch = CHASSIS[s.chassis], bk = BACK[s.backPanel]
@@ -186,8 +181,7 @@ function Phone() {
   }, [w, h, r, s.frontCamera])
   const gGeo = useMemo(() => glassGeo(w - 0.6, h - 0.6, r - 0.3, s.displayCurve), [w, h, r, s.displayCurve])
   const tex = useScreenTex(w - 1.6, h - 1.6, s.colorHex, s.refreshRate, s.displayType)
-  const backTex = bk.tex === 'carbon' ? carbonTex() : null
-  const bump = bk.tex === 'leather' ? noiseTex() : null
+  const bm = TX.back(s.backPanel), metalMaps = TX.metal()
   const speakers = Array.from({ length: 6 }, (_, i) => [12 + i * 2.6, -(12 + i * 2.6)]).flat()
 
   return (
@@ -200,19 +194,19 @@ function Phone() {
           <Subtraction position={[0, -h / 2 + 1, T / 2]} scale={[2.6, 1, 1]}><cylinderGeometry args={[1.25, 1.25, 8, 24]} /></Subtraction>
           {speakers.map((x, i) => <Subtraction key={i} position={[x, -h / 2 + 1, T / 2]}><cylinderGeometry args={[0.5, 0.5, 8, 12]} /></Subtraction>)}
         </Geometry>
-        <meshPhysicalMaterial color={chassisColor} metalness={ch.metalness} roughness={ch.roughness} clearcoat={0.2} />
+        <meshPhysicalMaterial color={chassisColor} metalness={ch.metalness} roughness={Math.min(1, ch.roughness * 1.5)} clearcoat={0.2} {...metalMaps} />
       </mesh>
 
       <Layer idx={0} z={z.back} name="Back panel + camera island">
         <mesh position={[0, 0, -0.5]}>
           <extrudeGeometry args={[backShape, { depth: 1, bevelEnabled: false, curveSegments: 32 }]} />
-          <meshPhysicalMaterial color={backTex ? '#ffffff' : s.colorHex} map={backTex} bumpMap={bump} bumpScale={bump ? 2 : 0} roughness={bk.roughness} metalness={bk.metalness} clearcoat={bk.clearcoat} />
+          <meshPhysicalMaterial color={bm.map ? '#ffffff' : s.colorHex} roughness={bm.roughnessMap ? Math.min(1, bk.roughness * 1.3) : bk.roughness} metalness={bk.metalness} clearcoat={bk.clearcoat} {...bm} />
         </mesh>
         <Island />
       </Layer>
 
       <Layer idx={1} z={z.bat} name={`${s.battery.name} + ${s.haptics}`}>
-        <mesh position={[0, -h * 0.14, 0]}><boxGeometry args={[w - 7, h * 0.36, bt]} /><meshStandardMaterial color="#2b3440" roughness={0.5} metalness={0.3} /></mesh>
+        <mesh position={[0, -h * 0.14, 0]}><boxGeometry args={[w - 7, h * 0.36, bt]} /><meshStandardMaterial map={TX.batt(s.battery.name)} roughness={0.5} metalness={0.3} /></mesh>
         {(s.haptics === 'Z-Axis Linear Motor' ? [[0, 1]] : s.haptics === 'Dual X-Axis Motors' ? [[-w * 0.25, 0], [w * 0.25, 0]] : [[w * 0.2, 0]]).map(([x, round], i) => (
           <mesh key={i} position={[x, -h * 0.42, 0]} rotation={[round ? Math.PI / 2 : 0, 0, 0]}>
             {round ? <cylinderGeometry args={[6, 6, 3.4, 24]} /> : <boxGeometry args={[18, 7, 3.4]} />}<meshStandardMaterial color="#8d9299" metalness={0.8} roughness={0.35} />
@@ -220,7 +214,7 @@ function Phone() {
       </Layer>
 
       <Layer idx={2} z={z.pcb} name={`PCB · ${s.soc.name} · ${s.ram.gb}GB ${s.ram.type}`}>
-        <mesh position={[0, h * 0.31, 0]}><boxGeometry args={[w - 8, h * 0.3, 1]} /><meshStandardMaterial color="#0f5a3a" roughness={0.6} /></mesh>
+        <mesh position={[0, h * 0.31, 0]}><boxGeometry args={[w - 8, h * 0.3, 1]} /><meshStandardMaterial map={TX.pcb()} roughness={0.5} /></mesh>
         <mesh position={[0, -h / 2 + 5, 0]}><boxGeometry args={[w - 14, 6, 1]} /><meshStandardMaterial color="#0f5a3a" /></mesh>
         <mesh position={[0, -h / 2 + 4.5, 1.2]}><boxGeometry args={[9, 3.4, 2.4]} /><meshStandardMaterial color="#c5c8cc" metalness={1} roughness={0.3} /></mesh>
         <mesh position={[-w * 0.12, h * 0.33, 0.95]}><boxGeometry args={[13, 13, 0.9]} /><meshStandardMaterial color="#3a3f4a" metalness={0.6} roughness={0.35} /></mesh>
@@ -230,7 +224,7 @@ function Phone() {
 
       <Layer idx={3} z={z.cool} name={s.cooling}>
         {s.cooling === 'Graphite Sheet' && <mesh position={[0, h * 0.05, 0]}><boxGeometry args={[w - 12, h * 0.6, ct]} /><meshStandardMaterial color="#26262b" roughness={0.8} /></mesh>}
-        {s.cooling !== 'Graphite Sheet' && <mesh position={[0, h * 0.1, 0]}><boxGeometry args={[w - 14, h * 0.5, ct * (s.cooling === 'Dual VC + Graphene' ? 0.5 : 1)]} /><meshStandardMaterial color="#b87333" metalness={1} roughness={0.3} /></mesh>}
+        {s.cooling !== 'Graphite Sheet' && <mesh position={[0, h * 0.1, 0]}><boxGeometry args={[w - 14, h * 0.5, ct * (s.cooling === 'Dual VC + Graphene' ? 0.5 : 1)]} /><meshStandardMaterial color="#b87333" metalness={1} roughness={0.6} {...metalMaps} /></mesh>}
         {s.cooling === 'Dual VC + Graphene' && <mesh position={[0, h * 0.1, ct * 0.35]}><boxGeometry args={[w - 12, h * 0.55, ct * 0.3]} /><meshStandardMaterial color="#1b1b20" roughness={0.7} /></mesh>}
         {s.cooling.startsWith('Active') && <group position={[0, h * 0.25, 0]}><Fan t={ct} /></group>}
       </Layer>
@@ -238,7 +232,7 @@ function Phone() {
       <Layer idx={4} z={z.disp} name={`${s.displayType} · ${s.refreshRate} Hz`}>
         <mesh position={[0, 0, -0.45]}>
           <extrudeGeometry args={[dispShape, { depth: 0.9, bevelEnabled: false, curveSegments: 32 }]} />
-          <meshBasicMaterial attach="material-0" map={tex} toneMapped={false} />
+          <meshStandardMaterial attach="material-0" color="#000" emissive="#fff" emissiveMap={tex} emissiveIntensity={1.25} roughness={0.35} />
           <meshStandardMaterial attach="material-1" color="#050506" />
         </mesh>
         {s.frontCamera !== 'Under-Display (UDC)' && (
@@ -263,13 +257,87 @@ function Rig({ children }: any) {
     ref.current.rotation.y = THREE.MathUtils.damp(ref.current.rotation.y, (s.showBack ? Math.PI : 0) + (s.isTeardownMode ? -0.55 : 0), 4, dt)
     ref.current.rotation.x = THREE.MathUtils.damp(ref.current.rotation.x, s.isTeardownMode ? 0.45 : 0, 4, dt)
   })
-  return <group ref={ref}>{children}</group>
+  return <group ref={ref} name="rig">{children}</group>
+}
+
+// Wraps anything editable: click selects it, TransformControls gizmo edits it, mouse-up commits to the store.
+function Selectable({ id, t, children }: any) {
+  const [obj, setObj] = useState<THREE.Group | null>(null)
+  const { editMode, selectedId, gizmo, snap, busy } = useStore((s) => ({ editMode: s.editMode, selectedId: s.selectedId, gizmo: s.gizmo, snap: s.snap, busy: !!s.renderJob }), shallow)
+  const commit = () => {
+    if (!obj) return
+    const v = { pos: obj.position.toArray(), rot: [obj.rotation.x, obj.rotation.y, obj.rotation.z], scale: obj.scale.toArray() }
+    if (id === 'body') useStore.setState({ body: v }); else useStore.getState().updatePart(id, v)
+  }
+  return (
+    <>
+      <group ref={setObj} position={t.pos as any} rotation={t.rot as any} scale={t.scale as any} onClick={(e) => { if (editMode) { e.stopPropagation(); useStore.setState({ selectedId: id }) } }}>{children}</group>
+      {editMode && selectedId === id && obj && !busy && <TransformControls object={obj} mode={gizmo} translationSnap={snap ? 0.05 : null} rotationSnap={snap ? Math.PI / 12 : null} scaleSnap={snap ? 0.1 : null} onMouseUp={commit} />}
+    </>
+  )
+}
+
+const GEO: Record<string, JSX.Element> = {
+  box: <boxGeometry args={[0.2, 0.2, 0.2]} />, sphere: <sphereGeometry args={[0.12, 32, 24]} />, cylinder: <cylinderGeometry args={[0.1, 0.1, 0.25, 32]} />,
+  capsule: <capsuleGeometry args={[0.07, 0.2, 8, 16]} />, torus: <torusGeometry args={[0.12, 0.04, 16, 48]} />, cone: <coneGeometry args={[0.12, 0.25, 32]} />, plate: <boxGeometry args={[0.3, 0.5, 0.02]} />,
+}
+function Parts() {
+  const parts = useStore((s) => s.parts)
+  return <>{parts.map((p) => (
+    <Selectable key={p.id} id={p.id} t={p}>
+      <mesh>{GEO[p.kind]}<meshPhysicalMaterial color={p.color} metalness={p.metalness} roughness={p.roughness} emissive={p.color} emissiveIntensity={p.emissive} clearcoat={0.4} /></mesh>
+    </Selectable>))}</>
+}
+function Body() { const t = useStore((s) => s.body); return <Selectable id="body" t={t}><Phone /></Selectable> }
+
+// Path-traced render: swaps in a float studio HDR + glossy floor, accumulates samples, saves a PNG.
+function RenderBridge() {
+  const { gl, scene, camera } = useThree()
+  const job = useStore((s) => s.renderJob)
+  useEffect(() => {
+    if (!job) return
+    let stop = false, pt: any, floor: THREE.Mesh | null = null, raf = 0
+    const prev = { bg: scene.background, env: scene.environment, pr: gl.getPixelRatio() }
+    ;(async () => {
+      try {
+        const { WebGLPathTracer } = await import('three-gpu-pathtracer')
+        if (stop) return
+        const hdr = studioHDR(); scene.background = hdr; scene.environment = hdr
+        const box = new THREE.Box3().setFromObject(scene.getObjectByName('rig')!)
+        floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.MeshStandardMaterial({ color: '#0b0e13', roughness: 0.14, metalness: 0.7 }))
+        floor.rotation.x = -Math.PI / 2; floor.position.y = box.min.y - 0.01; scene.add(floor)
+        gl.setPixelRatio(job.scale); camera.updateMatrixWorld(); scene.updateMatrixWorld(true)
+        pt = new WebGLPathTracer(gl); pt.bounces = 6; pt.transmissiveBounces = 8; pt.filterGlossyFactor = 0.4; pt.tiles.set(2, 2)
+        pt.setScene(scene, camera)
+        const tick = () => {
+          if (stop) return
+          pt.renderSample()
+          const n = Math.floor(pt.samples); useStore.setState({ renderProgress: Math.min(1, n / job.samples) })
+          if (n >= job.samples) {
+            const png = gl.domElement.toDataURL('image/png'), a = document.createElement('a')
+            a.href = png; a.download = 'phonecraft-3d-render.png'; a.click()
+            useStore.setState({ renderImage: png, renderJob: null })
+          } else raf = requestAnimationFrame(tick)
+        }
+        tick()
+      } catch (e) { console.error(e); useStore.setState({ renderJob: null }) }
+    })()
+    return () => {
+      stop = true; cancelAnimationFrame(raf); pt?.dispose()
+      if (floor) { scene.remove(floor); floor.geometry.dispose() }
+      scene.background = prev.bg; scene.environment = prev.env; gl.setPixelRatio(prev.pr)
+    }
+  }, [job])
+  return null
 }
 
 export default function SandboxCanvas() {
-  const auto = useStore((s) => s.autoRotate)
+  const { auto, busy, edit } = useStore((s) => ({ auto: s.autoRotate, busy: !!s.renderJob, edit: s.editMode }), shallow)
+  const [dpr, setDpr] = useState(1.75)
   return (
-    <Canvas camera={{ position: [0, 0, 4.6], fov: 35 }} dpr={[1, 2]} gl={{ antialias: true }}>
+    <Canvas camera={{ position: [0, 0, 4.6], fov: 35 }} dpr={dpr} frameloop={busy ? 'never' : 'always'} gl={{ antialias: true, preserveDrawingBuffer: true, powerPreference: 'high-performance' }}
+      onPointerMissed={() => useStore.getState().editMode && useStore.setState({ selectedId: null })}>
+      <PerformanceMonitor onDecline={() => setDpr(1)} onIncline={() => setDpr(1.75)} />
       <color attach="background" args={['#0d1117']} />
       <ambientLight intensity={0.25} />
       <directionalLight position={[3, 4, 5]} intensity={1.4} />
@@ -279,9 +347,11 @@ export default function SandboxCanvas() {
         <Lightformer form="rect" intensity={3} position={[6, 1, -2]} scale={[2, 8, 1]} color="#a8c8ff" />
         <Lightformer form="ring" intensity={2} position={[0, -3, -5]} scale={6} />
       </Environment>
-      <Rig><Phone /></Rig>
-      <ContactShadows position={[0, -1.15, 0]} opacity={0.5} scale={8} blur={2.6} far={3} />
-      <OrbitControls enablePan={false} minDistance={1.8} maxDistance={8} autoRotate={auto} autoRotateSpeed={1.4} />
+      <Rig><Body /><Parts /></Rig>
+      {!busy && !edit && <ContactShadows position={[0, -1.15, 0]} opacity={0.5} scale={8} blur={2.6} far={3} frames={1} />}
+      {!busy && edit && <><gridHelper args={[6, 60, '#3a4656', '#1c2430']} position={[0, -1, 0]} /><GizmoHelper alignment="bottom-right" margin={[70, 70]}><GizmoViewport /></GizmoHelper></>}
+      <OrbitControls makeDefault enabled={!busy} enablePan={edit} minDistance={1.2} maxDistance={9} autoRotate={auto} autoRotateSpeed={1.4} />
+      <RenderBridge />
     </Canvas>
   )
 }

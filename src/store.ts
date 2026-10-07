@@ -1,6 +1,9 @@
 import { create } from 'zustand'
+import { shallow } from 'zustand/shallow'
 import * as D from './data'
 
+export interface Xf { pos: number[]; rot: number[]; scale: number[] }
+export interface Part extends Xf { id: string; kind: string; name: string; color: string; metalness: number; roughness: number; emissive: number }
 export interface PhoneState {
   baseWidth: number; baseHeight: number; cornerRounding: number
   frontGlass: D.GlassTech; chassis: D.ChassisMaterial; backPanel: D.BackPanelMaterial; colorHex: string
@@ -13,6 +16,10 @@ export interface PhoneState {
   // derived + view state
   thicknessMM: number; cameraBumpMM: number; thermalRatio: number
   flashOn: boolean; showBack: boolean; autoRotate: boolean
+  editMode: boolean; gizmo: 'translate' | 'rotate' | 'scale'; snap: boolean; selectedId: string | null
+  parts: Part[]; body: Xf; focusLayer: number | null
+  renderJob: { samples: number; scale: number } | null; renderProgress: number; renderImage: string | null
+  addPart: (kind: string) => void; updatePart: (id: string, p: Partial<Part>) => void; removePart: (id: string) => void; duplicatePart: (id: string) => void
   set: (p: Partial<PhoneState>) => void
   toggleCamera: (c: D.CameraSensor) => void
 }
@@ -50,9 +57,17 @@ export const useStore = create<PhoneState>((set) => {
     rearCameras: [find(D.CAMERAS, 'id', 'lyt900'), find(D.CAMERAS, 'id', 'imx858uw'), find(D.CAMERAS, 'id', 'ov64b')],
     frontCamera: 'Punch-Hole', cameraLayout: 'Matrix Squircle',
     isTeardownMode: false, explodedSlider: 0.6, flashOn: false, showBack: false, autoRotate: false,
+    editMode: false, gizmo: 'translate', snap: false, selectedId: null, parts: [], body: { pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] }, focusLayer: null,
+    renderJob: null, renderProgress: 0, renderImage: null,
   }
   return {
     ...base, ...derive(base),
+    addPart: (kind) => set((s) => { const id = Math.random().toString(36).slice(2, 9); const n = s.parts.filter((p) => p.kind === kind).length + 1
+      return { parts: [...s.parts, { id, kind, name: `${kind} ${n}`, pos: [0.6, 0, 0.1], rot: [0, 0, 0], scale: [1, 1, 1], color: '#f0a63a', metalness: 0.4, roughness: 0.35, emissive: 0 }], selectedId: id } }),
+    updatePart: (id, p) => set((s) => ({ parts: s.parts.map((x) => (x.id === id ? { ...x, ...p } : x)) })),
+    removePart: (id) => set((s) => ({ parts: s.parts.filter((x) => x.id !== id), selectedId: s.selectedId === id ? 'body' : s.selectedId })),
+    duplicatePart: (id) => set((s) => { const o = s.parts.find((x) => x.id === id); if (!o) return {}; const n = Math.random().toString(36).slice(2, 9)
+      return { parts: [...s.parts, { ...o, id: n, name: o.name + ' copy', pos: [o.pos[0] + 0.15, o.pos[1], o.pos[2]] }], selectedId: n } }),
     set: (p) => set((s) => ({ ...s, ...p, ...derive({ ...s, ...p }) } as any)),
     toggleCamera: (c) => set((s) => {
       const has = s.rearCameras.some((x) => x.id === c.id)
@@ -62,3 +77,6 @@ export const useStore = create<PhoneState>((set) => {
     }),
   }
 })
+
+export const usePick = <K extends keyof PhoneState>(keys: K[]) =>
+  useStore((s) => { const o: any = {}; for (const k of keys) o[k] = s[k]; return o as Pick<PhoneState, K> }, shallow)
